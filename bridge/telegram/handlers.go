@@ -512,6 +512,17 @@ func (b *Btelegram) handleEdit(msg *config.Message, chatid int64) (string, error
 
 // handleUploadFile handles native upload of files
 func (b *Btelegram) handleUploadFile(msg *config.Message, chatid int64, threadid int, parentID int) (string, error) {
+	return b.sendMediaFiles(msg, chatid, threadid, parentID, b.buildMediaGroup(msg))
+}
+
+// buildMediaGroup builds the list of media items to upload for the given message.
+//
+// The caption of every item contains the sender's nick, so that media-only
+// messages still show who sent them (see
+// https://github.com/matterbridge-org/matterbridge/issues/260).
+//
+//nolint:funlen // This function is necessarily long because it handles all media types.
+func (b *Btelegram) buildMediaGroup(msg *config.Message) []any {
 	var media []any
 	equal := true
 	first := true
@@ -565,11 +576,14 @@ func (b *Btelegram) handleUploadFile(msg *config.Message, chatid int64, threadid
 			fi.Comment = makeHTML(html.EscapeString(fi.Comment))
 		}
 
+		caption, parseMode := TGGetParseMode(b, msg.Username, fi.Comment)
+		if caption == "" {
+			parseMode = ""
+		}
+
 		if !equal {
 			dc := tgbotapi.NewInputMediaDocument(file)
-			if fi.Comment != "" {
-				dc.Caption, dc.ParseMode = TGGetParseMode(b, msg.Username, fi.Comment)
-			}
+			dc.Caption, dc.ParseMode = caption, parseMode
 			media = append(media, dc)
 			continue
 		}
@@ -577,33 +591,24 @@ func (b *Btelegram) handleUploadFile(msg *config.Message, chatid int64, threadid
 		switch filepath.Ext(fi.Name) {
 		case ".jpg", ".jpe", ".png":
 			pc := tgbotapi.NewInputMediaPhoto(file)
-			if fi.Comment != "" {
-				pc.Caption, pc.ParseMode = TGGetParseMode(b, msg.Username, fi.Comment)
-			}
+			pc.Caption, pc.ParseMode = caption, parseMode
 			media = append(media, pc)
 		case ".mp4", ".m4v":
 			vc := tgbotapi.NewInputMediaVideo(file)
-			if fi.Comment != "" {
-				vc.Caption, vc.ParseMode = TGGetParseMode(b, msg.Username, fi.Comment)
-			}
+			vc.Caption, vc.ParseMode = caption, parseMode
 			media = append(media, vc)
 		case ".mp3", ".oga", ".ogg", ".opus", ".flac":
 			ac := tgbotapi.NewInputMediaAudio(file)
-			if fi.Comment != "" {
-				ac.Caption, ac.ParseMode = TGGetParseMode(b, msg.Username, fi.Comment)
-			}
 			ac.Caption = fi.Name
 			media = append(media, ac)
 		default:
 			dc := tgbotapi.NewInputMediaDocument(file)
-			if fi.Comment != "" {
-				dc.Caption, dc.ParseMode = TGGetParseMode(b, msg.Username, fi.Comment)
-			}
+			dc.Caption, dc.ParseMode = caption, parseMode
 			media = append(media, dc)
 		}
 	}
 
-	return b.sendMediaFiles(msg, chatid, threadid, parentID, media)
+	return media
 }
 
 func (b *Btelegram) handleQuote(message, quoteNick, quoteMessage string) string {

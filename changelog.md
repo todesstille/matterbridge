@@ -90,6 +90,7 @@
 - telegram
   - OGG Vorbis attachments are now sent as audio or document to prevent confusion being received as a corrupted voice message
   - attachments of mixed types in the same message will be uploaded as documents
+  - media-only attachments now include the sender's nick in the caption ([#260](https://github.com/matterbridge-org/matterbridge/issues/260))
 - slack
   - file uploading now use the new upload steps described in the slack docs via `UploadFileV2`, replacing the deprecated and now disabled `file.upload` based method (via `UploadFile`) ([#129](https://github.com/matterbridge-org/matterbridge/pull/129))
   - file and image downloads now work with Socket Mode apps: the Events API delivers file objects
@@ -100,6 +101,7 @@
     longer than Discord URLs ([#37](https://github.com/matterbridge-org/matterbridge/issues/37), [#114](https://github.com/matterbridge-org/matterbridge/pull/114))
   - all users in a guild are considered for name lookup instead of only a subset of 1000 ([#198](https://github.com/matterbridge-org/matterbridge/pull/198))
   - discord now sets `{USERID}` in a `RemoteNickFormat` to the username rather than the actual user ID ([#225](https://github.com/matterbridge-org/matterbridge/pull/225))
+  - text sent along with attachments is now used as the attachment comment again, instead of being discarded ([#260](https://github.com/matterbridge-org/matterbridge/issues/260))
 - irc
   - when there are attachments in the message, the body is now sent instead of being discarded silently ([#156](https://github.com/matterbridge-org/matterbridge/pull/156))
   - when an attachment has no public URL, an error message is printed/logged encouraging the

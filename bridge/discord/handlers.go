@@ -217,19 +217,29 @@ func (b *Bdiscord) messageCreate(s *discordgo.Session, m *discordgo.MessageCreat
 	// messages while we download the attachments.
 	go func() {
 		count := 0
+		// Attach the message text as a comment to the first successfully
+		// downloaded attachment, so the text is not repeated for every file.
+		comment := rmsg.Text
 		for _, attach := range m.Attachments {
-			err := b.AddAttachmentFromURL(&rmsg, attach.Filename, attach.ID, "", attach.URL)
+			err := b.AddAttachmentFromURL(&rmsg, attach.Filename, attach.ID, comment, attach.URL)
 			if err != nil {
 				b.Log.WithError(err).Warnf("Failed to download attachment %s", attach.Filename)
 				continue
 			}
 
+			comment = ""
 			count += 1
 		}
 
 		if rmsg.Text == "" && count == 0 {
 			b.Log.Warnf("Skipping message because there is no text and file uploads all failed")
 			return
+		}
+
+		// The text was added as a comment to an attachment, don't send it
+		// again as a separate message on bridges that support both.
+		if count > 0 {
+			rmsg.Text = ""
 		}
 
 		b.Log.Debugf("<= Sending message attachments from %s on %s to gateway", m.Author.Username, b.Account)
