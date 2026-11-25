@@ -595,11 +595,7 @@ func (b *Birc) handleOtherAuth(client *girc.Client, event girc.Event) {
 }
 
 func (b *Birc) handlePrivMsg(client *girc.Client, event girc.Event) {
-	if len(event.Params) < 2 || event.Source == nil {
-		return
-	}
-
-	if event.Echo || b.skipPrivMsg(event) {
+	if b.skipPrivMsg(event) {
 		return
 	}
 
@@ -632,6 +628,23 @@ func (b *Birc) handlePrivMsg(client *girc.Client, event girc.Event) {
 	// we'll treat it as a byte slice first, convert to utf-8 if needed, then do our own version of StripAction
 	rmsg.Text = event.Params[len(event.Params)-1]
 
+	if !b.decodeMessageText(&rmsg) {
+		return
+	}
+
+	// let's make sure only to modify the message text AFTER the possible utf-8 conversion.
+	// strip action, we made an event if it was an action
+	if event.IsAction() {
+		rmsg.Text = rmsg.Text[8 : len(rmsg.Text)-1]
+	}
+
+	b.Log.Debugf("<= Sending message from %s on %s to gateway", event.Params[0], b.Account)
+
+	b.Remote <- rmsg
+}
+
+// decodeMessageText returns false when the incoming message cannot be decoded.
+func (b *Birc) decodeMessageText(rmsg *config.Message) bool {
 	mycharset := b.GetString("Charset")
 
 	switch mycharset {
@@ -648,7 +661,7 @@ func (b *Birc) handlePrivMsg(client *girc.Client, event girc.Event) {
 		result, err := detector.DetectBest([]byte(rmsg.Text))
 		if err != nil {
 			b.Log.Infof("detection failed for rmsg.Text: %#v", rmsg.Text)
-			return
+			return false
 		}
 		b.Log.Debugf("detected %s confidence %#v", result.Charset, result.Confidence)
 		mycharset = result.Charset
@@ -661,7 +674,7 @@ func (b *Birc) handlePrivMsg(client *girc.Client, event girc.Event) {
 		r, err := charset.NewReader(mycharset, strings.NewReader(rmsg.Text))
 		if err != nil {
 			b.Log.Errorf("charset to utf-8 conversion failed: %s", err)
-			return
+			return false
 		}
 
 		output, _ := io.ReadAll(r)
@@ -669,14 +682,7 @@ func (b *Birc) handlePrivMsg(client *girc.Client, event girc.Event) {
 		rmsg.Text = string(output)
 	}
 
-	// let's make sure only to modify the message text AFTER the possible utf-8 conversion.
-	// strip action, we made an event if it was an action
-	if event.IsAction() {
-		rmsg.Text = rmsg.Text[8 : len(rmsg.Text)-1]
-	}
-
-	b.Log.Debugf("<= Sending message from %s on %s to gateway", event.Params[0], b.Account)
-	b.Remote <- rmsg
+	return true
 }
 
 func (b *Birc) handleRunCommands() {

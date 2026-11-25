@@ -246,30 +246,37 @@ func (b *Birc) Send(msg config.Message) (string, error) {
 	//
 	// For now, we'll repurpose the MessageSplit setting to hand off the whole message to girc when set to false.
 	if b.GetBool("MessageSplit") {
-		msgLines := helper.GetSubLinesWords(msg.Text, b.MessageLength-prefix, b.GetString("MessageClipped"))
-		for i := range msgLines {
-			if len(b.Local) >= b.MessageQueue {
-				b.Log.Debugf("flooding, dropping message (queue at %d)", len(b.Local))
-
-				if i > 0 {
-					return msg.ID, nil
-				}
-				return "", nil
-			}
-
-			msg.Text = msgLines[i]
-
-			b.Local <- msg
-		}
-	} else { // Not splitting messages.  Hopefully girc does it, or else the server might silently drop it
-		if len(msg.Text)+prefix > (b.maxLen + defaultMaxPrefix) {
-			b.Log.Warn("Warning: Large message possibly dropped instead of sent")
-		}
-
-		b.Local <- msg
+		return b.enqueueSplitMessage(msg, prefix), nil
 	}
 
+	// Not splitting here: let girc split the message when sending it.
+	if len(msg.Text)+prefix > (b.maxLen + defaultMaxPrefix) {
+		b.Log.Warn("Warning: Large message possibly dropped instead of sent")
+	}
+
+	b.Local <- msg
+
 	return msg.ID, nil
+}
+
+// enqueueSplitMessage returns an ID only when at least one fragment was queued.
+func (b *Birc) enqueueSplitMessage(msg config.Message, prefix int) string {
+	sentID := ""
+
+	lines := helper.GetSubLinesWords(msg.Text, b.MessageLength-prefix, b.GetString("MessageClipped"))
+	for _, line := range lines {
+		if len(b.Local) >= b.MessageQueue {
+			b.Log.Debugf("flooding, dropping message (queue at %d)", len(b.Local))
+			return sentID
+		}
+
+		msg.Text = line
+		b.Local <- msg
+
+		sentID = msg.ID
+	}
+
+	return sentID
 }
 
 func (b *Birc) doJoin() {
@@ -351,39 +358,8 @@ func (b *Birc) doSend() {
 
 		<-throttle.C
 		username := msg.Username
-		// Optional support for the proposed RELAYMSG extension, described at
-		// https://github.com/jlu5/ircv3-specifications/blob/master/extensions/relaymsg.md
-		// nolint:nestif
-		if b.GetBool("UseRelayMsg") { // Let's check this by itself first.
-			// Avoid needlessly querying the irc lib on each msg, in case it takes out any locks
-			if b.i.HasCapability("overdrivenetworks.com/relaymsg") || b.i.HasCapability("draft/relaymsg") {
-				// nick is now sanitized in gateway.go
-				text := msg.Text
-
-				// Work around girc chomping leading commas on single word messages?
-				if b.GetBool("DoubleColonPrefix") {
-					if strings.HasPrefix(text, ":") && !strings.ContainsRune(text, ' ') {
-						b.Log.Warn("This option may be deprecated in the future. If you are using it, please help us understand the usecase by commenting on this issue: https://github.com/matterbridge-org/matterbridge/issues/122")
-
-						text = ":" + text
-					}
-				} else {
-					// TODO: This is so spammy when using RelayMsg.  Remove it at first opportunity
-					b.Log.Debug("Leading colon workaround has been disabled; reenable it with `DoubleColonPrefix=true`.")
-				}
-
-				if msg.Event == config.EventUserAction {
-					text = "\x01ACTION " + text + "\x01"
-				}
-
-				err = b.sendIRC(msg, fmt.Sprintf("RELAYMSG %s %s :%s", msg.Channel, username, text))
-				if err != nil {
-					b.Log.Warnf("Error sending RELAYMSG: %s", err)
-				}
-				continue // fix for #235
-			} else { // We have UseRelayMsg set but lack the capability.  Log a warning
-				b.Log.Warn("WARNING!  UseRelayMsg was set, but the irc server does not support it.")
-			}
+		if b.sendRelayMessage(msg) {
+			continue
 		}
 
 		var cmdline string
@@ -404,6 +380,52 @@ func (b *Birc) doSend() {
 			b.Log.Warnf("Error sending IRC message: %s", err)
 		}
 	}
+}
+
+// sendRelayMessage returns whether RELAYMSG was used, even if the send failed.
+// https://github.com/jlu5/ircv3-specifications/blob/master/extensions/relaymsg.md
+func (b *Birc) sendRelayMessage(msg config.Message) bool {
+	if !b.GetBool("UseRelayMsg") {
+		return false
+	}
+
+	if !b.i.HasCapability("overdrivenetworks.com/relaymsg") && !b.i.HasCapability("draft/relaymsg") {
+		b.Log.Warn("WARNING! UseRelayMsg was set, but the irc server does not support it.")
+		return false
+	}
+
+	// The nickname is already sanitized by the gateway.
+	text := msg.Text
+	if b.GetBool("DoubleColonPrefix") {
+		if strings.HasPrefix(text, ":") && !strings.ContainsRune(text, ' ') {
+			b.Log.Warn("This option may be deprecated in the future. If you are using it, please help us understand the usecase by commenting on this issue: https://github.com/matterbridge-org/matterbridge/issues/122")
+
+			text = ":" + text
+		}
+	} else {
+		b.Log.Debug("Leading colon workaround has been disabled; reenable it with `DoubleColonPrefix=true`.")
+	}
+
+	if msg.Event == config.EventUserAction {
+		text = "\x01ACTION " + text + "\x01"
+	}
+
+	err := b.sendIRC(msg, fmt.Sprintf("RELAYMSG %s %s :%s", msg.Channel, msg.Username, text))
+	if err != nil {
+		b.Log.Warnf("Error sending RELAYMSG: %s", err)
+	}
+
+	return true
+}
+
+func (b *Birc) supportedCaps() map[string][]string {
+	caps := map[string][]string{"overdrivenetworks.com/relaymsg": nil, "draft/relaymsg": nil}
+	if b.GetBool("PreserveThreading") {
+		caps["echo-message"] = nil
+		caps["labeled-response"] = nil
+	}
+
+	return caps
 }
 
 // validateInput validates the server/port/nick configuration. Returns a *girc.Client if successful
@@ -466,13 +488,8 @@ func (b *Birc) getClient() (*girc.Client, error) {
 		// don't risk sending huge messages that girc may end up splitting too fast
 		AllowFlood:    b.GetBool("MessageSplit"),
 		Debug:         debug,
-		SupportedCaps: map[string][]string{"overdrivenetworks.com/relaymsg": nil, "draft/relaymsg": nil},
+		SupportedCaps: b.supportedCaps(),
 	})
-
-	if b.GetBool("PreserveThreading") {
-		i.Config.SupportedCaps["echo-message"] = nil
-		i.Config.SupportedCaps["labeled-response"] = nil
-	}
 
 	return i, nil
 }
@@ -590,6 +607,10 @@ func (b *Birc) ircHandlePanic() {
 }
 
 func (b *Birc) skipPrivMsg(event girc.Event) bool {
+	if len(event.Params) < 2 || event.Source == nil || event.Echo {
+		return true
+	}
+
 	// Our nick can be changed
 	b.Nick = b.i.GetNick()
 
@@ -602,10 +623,8 @@ func (b *Birc) skipPrivMsg(event girc.Event) bool {
 		return true
 	}
 	// don't forward message from ourself
-	if event.Source != nil {
-		if event.Source.Name == b.Nick {
-			return true
-		}
+	if event.Source.Name == b.Nick {
+		return true
 	}
 	// don't forward messages we sent via RELAYMSG
 	if relayedNick, ok := event.Tags.Get("draft/relaymsg"); ok && relayedNick == b.Nick {

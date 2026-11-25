@@ -17,21 +17,41 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - uses: actions/setup-go@v7
         with:
           go-version: 1.26.x
+      - name: Select lint base
+        id: lint-base
+        shell: bash
+        env:
+          LINT_PR_BASE: ${{ github.event.pull_request.base.sha }}
+          LINT_PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            lint_base=$(git merge-base "$LINT_PR_BASE" HEAD)
+          elif [[ -n "$LINT_PUSH_BEFORE" && "$LINT_PUSH_BEFORE" != "0000000000000000000000000000000000000000" ]] &&
+               git cat-file -e "${LINT_PUSH_BEFORE}^{commit}" 2>/dev/null; then
+            lint_base="$LINT_PUSH_BEFORE"
+          elif git rev-parse --verify HEAD^ >/dev/null 2>&1; then
+            # A newly created branch has no "before" commit on GitHub.
+            lint_base=$(git rev-parse HEAD^)
+          else
+            # A repository's root commit has no parent: check all its files.
+            lint_base=$(git hash-object -t tree -w /dev/null)
+          fi
+          echo "rev=$lint_base" >> "$GITHUB_OUTPUT"
+          echo "Lint changes since $lint_base"
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.12
-          # Only compare with previous commit when pushing,
-          # and with base branch when in PR.
-          only-new-issues: true
-          args: --build-tags=goolm
+          version: v2.12.2
+          args: --build-tags=goolm --new-from-rev=${{ steps.lint-base.outputs.rev }}
       - name: golangci-lint (entire codebase)
         uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.12
+          version: v2.12.2
           args: --build-tags=goolm --config=.golangci-incremental.yaml
   test:
     strategy:
@@ -40,12 +60,12 @@ jobs:
         go-version: [1.26.x, stable]
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
       - name: Install Go
         uses: actions/setup-go@v7
         with:
           go-version: ${{ matrix.go-version }}
-      - name: Checkout code
-        uses: actions/checkout@v7
       - name: go fmt ./... (go version ${{ matrix.go-version }})
         run: go fmt ./...; git status && git diff --exit-code
       - name: go test -tags goolm ./... (go version ${{ matrix.go-version }})
@@ -65,19 +85,19 @@ jobs:
             goos: darwin
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
       - name: Install Go
         uses: actions/setup-go@v7
         with:
           go-version: stable
-      - name: Checkout code
-        uses: actions/checkout@v7
       - name: Build/upload matterbridge for ${{ matrix.platform.goos }}-${{ matrix.arch }}
         env:
           GOOS: ${{ matrix.platform.goos }}
           GOARCH: ${{ matrix.arch }}
         run: |
           CGO_ENABLED=0 go build -tags goolm -ldflags "-s -X github.com/matterbridge-org/matterbridge/version.GitHash=$(git log --pretty=format:'%h' -n 1)" -o matterbridge
-      - name: Upload matterbridge-${{ matrix.name }}-${{ matrix.arch }}
+      - name: Upload matterbridge-${{ matrix.platform.name }}-${{ matrix.arch }}
         uses: actions/upload-artifact@v4
         with:
           name: matterbridge-${{ matrix.platform.goos }}-${{ matrix.arch }}

@@ -28,6 +28,19 @@ MessageSplit=false
 MessageDelay=1
 `
 
+func TestHandlePrivMsgDropsMalformedAndEchoEvents(t *testing.T) {
+	b := &Birc{}
+	for _, event := range []girc.Event{
+		{},
+		{Source: &girc.Source{Name: "alice"}, Params: []string{"#test"}},
+		{Params: []string{"#test", "message"}},
+		{Source: &girc.Source{Name: "bot"}, Params: []string{"#test", "echo"}, Echo: true},
+	} {
+		// These events must be discarded before accessing the client or gateway.
+		b.handlePrivMsg(nil, event)
+	}
+}
+
 func TestIRCThreadCorrelation(t *testing.T) {
 	tracker := newIRCThreads()
 	id := tracker.newID("#test")
@@ -287,6 +300,47 @@ func TestIRCNativeRepliesOnWire(t *testing.T) { //nolint:funlen // Exercises a c
 	case <-time.After(time.Second):
 		t.Fatal("reply to final fragment not delivered")
 	}
+}
+
+func TestIRCSplitQueueKeepsIDForSentFragments(t *testing.T) {
+	b, _, _ := newThreadTestConnection(t, "server-time", true)
+	b.SetBool("MessageSplit", true)
+	b.MessageQueue = 1
+
+	id, err := b.Send(config.Message{Channel: "#test", Text: "first\nsecond\nthird"})
+	require.NoError(t, err)
+	require.NotEmpty(t, id)
+	require.Len(t, b.Local, 1)
+
+	droppedID, err := b.Send(config.Message{Channel: "#test", Text: "queue is full"})
+	require.NoError(t, err)
+	require.Empty(t, droppedID)
+
+	queued := <-b.Local
+	require.Equal(t, "first", queued.Text)
+	require.Equal(t, id, queued.ID)
+}
+
+func TestIRCRelayMessageOnWire(t *testing.T) {
+	b, _, onWire := newThreadTestConnection(t, "server-time message-tags echo-message draft/relaymsg", true)
+	b.SetBool("UseRelayMsg", true)
+	b.SetBool("DoubleColonPrefix", true)
+
+	msg := config.Message{Channel: "#test", Username: "alice", Text: ":word"}
+	msg.ID = b.threads.newID(msg.Channel)
+	require.True(t, b.sendRelayMessage(msg))
+
+	frame := onWire()
+	require.Equal(t, "RELAYMSG", frame.Command)
+	require.Equal(t, []string{"#test", "alice", "::word"}, frame.Params)
+
+	msg.Event, msg.Text = config.EventUserAction, "waves"
+	msg.ID = b.threads.newID(msg.Channel)
+	require.True(t, b.sendRelayMessage(msg))
+	require.Equal(t, "\x01ACTION waves\x01", onWire().Last())
+
+	b.SetBool("UseRelayMsg", false)
+	require.False(t, b.sendRelayMessage(msg))
 }
 
 func TestIRCThreadingFallbackOnWire(t *testing.T) {
