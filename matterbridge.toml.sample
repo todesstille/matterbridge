@@ -112,6 +112,15 @@ MessageLength=512
 #OPTIONAL (default true)
 MessageSplit=true
 
+#Preserve native IRCv3 replies when the server permits +reply client tags.
+#The bridge requests echo-message and labeled-response to learn outgoing msgids.
+#Reply links require a known parent in this process's bounded in-memory cache;
+#after a restart or eviction, existing text quotes remain the fallback.
+#QuoteDisable/QuoteFormat in the source bridge still control those text quotes.
+#Can also be enabled in [general]. Requires a client with IRCv3 reply support.
+#OPTIONAL (default false)
+#PreserveThreading=true
+
 #Message to show when a message is too big
 #Default "<clipped message>"
 MessageClipped="<clipped message>"

@@ -62,6 +62,7 @@ func (b *Birc) handleFiles(msg *config.Message) bool {
 	}
 
 	for _, rmsg := range helper.HandleExtra(msg, b.General) {
+		rmsg.ID, rmsg.ParentID = msg.ID, msg.ParentID
 		b.Local <- rmsg
 	}
 
@@ -72,7 +73,7 @@ func (b *Birc) handleFiles(msg *config.Message) bool {
 	// We have some attachments, which may or may not have a caption
 	// First, let's print the message body, if any
 	if msg.Text != "" {
-		b.Local <- config.Message{Text: msg.Text, Username: msg.Username, Channel: msg.Channel, Event: msg.Event}
+		b.Local <- config.Message{Text: msg.Text, Username: msg.Username, Channel: msg.Channel, Event: msg.Event, ID: msg.ID, ParentID: msg.ParentID}
 	}
 
 	for _, f := range msg.Extra["file"] {
@@ -84,7 +85,7 @@ func (b *Birc) handleFiles(msg *config.Message) bool {
 			// Here we just produce an error to be announced and logged, hoping the
 			// matterbridge operator will finally enable the media server.
 			msg.Text = fmt.Sprintf("Could not share file %s (no mediaserver configured)", fi.Name)
-			b.Local <- config.Message{Text: msg.Text, Username: "<matterbridge>", Channel: msg.Channel, Event: msg.Event}
+			b.Local <- config.Message{Text: msg.Text, Username: "<matterbridge>", Channel: msg.Channel, Event: msg.Event, ID: msg.ID, ParentID: msg.ParentID}
 
 			b.Log.Error(msg.Text)
 
@@ -100,7 +101,7 @@ func (b *Birc) handleFiles(msg *config.Message) bool {
 			msg.Text = fi.Comment + " : " + fi.URL
 		}
 
-		b.Local <- config.Message{Text: msg.Text, Username: msg.Username, Channel: msg.Channel, Event: msg.Event}
+		b.Local <- config.Message{Text: msg.Text, Username: msg.Username, Channel: msg.Channel, Event: msg.Event, ID: msg.ID, ParentID: msg.ParentID}
 	}
 
 	return true
@@ -458,6 +459,10 @@ func (b *Birc) handleISupportCM(client *girc.Client, event girc.Event) {
 func (b *Birc) handleNewConnection(client *girc.Client, event girc.Event) {
 	b.Log.Debug("Registering callbacks")
 	i := b.i
+	if b.GetBool("PreserveThreading") {
+		b.Log.Infof("IRC reply capabilities: message-tags=%t echo-message=%t labeled-response=%t",
+			i.HasCapability("message-tags"), i.HasCapability("echo-message"), i.HasCapability("labeled-response"))
+	}
 	b.Nick = event.Params[0]
 	b.Log.Debug("Clearing handlers before adding in case of BNC reconnect")
 	i.Handlers.Clear("PRIVMSG")
@@ -493,7 +498,6 @@ func (b *Birc) handleNewConnection(client *girc.Client, event girc.Event) {
 	i.Handlers.Add(girc.RPL_ISUPPORT, b.handleISupportBOT) // enable bot mode
 	i.Handlers.Add(girc.RPL_ISUPPORT, b.handleISupportCM)  // determine casemapping value
 
-	// i.Handlers.Add(girc.CAP, b.handleCapMsgid) // TODO: add this later
 	// i.Handlers.Add(girc.CAP, b.handleCapMultiline) // TODO: add this later
 	i.Handlers.Add(girc.CAP, b.handleCapRelay) // autodetect the separator character for relaymsg
 
@@ -591,7 +595,11 @@ func (b *Birc) handleOtherAuth(client *girc.Client, event girc.Event) {
 }
 
 func (b *Birc) handlePrivMsg(client *girc.Client, event girc.Event) {
-	if b.skipPrivMsg(event) {
+	if len(event.Params) < 2 || event.Source == nil {
+		return
+	}
+
+	if event.Echo || b.skipPrivMsg(event) {
 		return
 	}
 
@@ -601,6 +609,8 @@ func (b *Birc) handlePrivMsg(client *girc.Client, event girc.Event) {
 		Account:  b.Account,
 		UserID:   event.Source.Ident + "@" + event.Source.Host,
 	}
+
+	rmsg.ID, rmsg.ParentID = b.threads.receive(b.threadChannel(event.Params[0]), event)
 
 	b.Log.Debugf("== Receiving PRIVMSG: %s %s %#v", event.Source.Name, event.Last(), event)
 

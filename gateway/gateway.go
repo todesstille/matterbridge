@@ -192,7 +192,11 @@ func (gw *Gateway) SendMessage( //nolint:gocyclo,funlen
 
 	msg.ParentID = gw.getDestMsgID(canonicalParentMsgID, dest, channel)
 	if msg.ParentID == "" {
-		msg.ParentID = strings.Replace(canonicalParentMsgID, dest.Protocol+" ", "", 1)
+		// An unmapped ID is usable only on its original protocol. Never pass
+		// e.g. "telegram 123" to IRC as if it were an IRC message ID.
+		if id, ok := strings.CutPrefix(canonicalParentMsgID, dest.Protocol+" "); ok {
+			msg.ParentID = id
+		}
 	}
 
 	// if the parentID is still empty and we have a parentID set in the original message

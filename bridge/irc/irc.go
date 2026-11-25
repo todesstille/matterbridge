@@ -26,6 +26,7 @@ import (
 
 type Birc struct {
 	i                                         *girc.Client
+	threads                                   *ircThreads
 	Nick                                      string
 	names                                     map[string][]string
 	namesMu                                   sync.RWMutex // protect the names map from concurrent write attempts
@@ -58,6 +59,7 @@ func New(cfg *bridge.Config) bridge.Bridger {
 	b.connected = make(chan error)
 	b.names = make(map[string][]string)
 	b.channels = make(map[string]bool)
+	b.threads = newIRCThreads()
 
 	if b.GetInt("MessageDelay") == 0 {
 		b.MessageDelay = 1300
@@ -127,7 +129,8 @@ func (b *Birc) Connect() error {
 	i.Handlers.Add(girc.RPL_WELCOME, b.handleNewConnection)
 	i.Handlers.Add(girc.RPL_ENDOFMOTD, b.handleOtherAuth)
 	i.Handlers.Add(girc.ERR_NOMOTD, b.handleOtherAuth)
-	i.Handlers.Add(girc.ALL_EVENTS, b.handleOther)
+	otherHandler := i.Handlers.Add(girc.ALL_EVENTS, b.handleOther)
+	i.Handlers.Add(girc.ALL_EVENTS, b.handleThreadEvent)
 	b.i = i
 
 	go b.doJoin()
@@ -141,7 +144,7 @@ func (b *Birc) Connect() error {
 		b.Log.Info("Connection succeeded for bridge " + b.Account)
 		b.FirstConnection = false
 		if b.GetInt("DebugLevel") == 0 {
-			b.i.Handlers.Clear(girc.ALL_EVENTS)
+			b.i.Handlers.Remove(otherHandler)
 		}
 	}()
 
@@ -149,6 +152,7 @@ func (b *Birc) Connect() error {
 }
 
 func (b *Birc) Disconnect() error {
+	b.threads.disconnected()
 	b.i.Close()
 	close(b.Local)
 	close(b.channelsChan)
@@ -205,9 +209,14 @@ func (b *Birc) Send(msg config.Message) (string, error) {
 	// of doing several writes to the b.Local queue.
 	prefix := b.handlePrefix(&msg)
 
+	msg.ID = ""
+	if b.GetBool("PreserveThreading") {
+		msg.ID = b.threads.newID(b.threadChannel(msg.Channel))
+	}
+
 	// handle files, return if we're done here
 	if ok := b.handleFiles(&msg); ok {
-		return "", nil
+		return msg.ID, nil
 	}
 
 	if b.GetBool("StripMarkdown") {
@@ -241,6 +250,10 @@ func (b *Birc) Send(msg config.Message) (string, error) {
 		for i := range msgLines {
 			if len(b.Local) >= b.MessageQueue {
 				b.Log.Debugf("flooding, dropping message (queue at %d)", len(b.Local))
+
+				if i > 0 {
+					return msg.ID, nil
+				}
 				return "", nil
 			}
 
@@ -255,8 +268,8 @@ func (b *Birc) Send(msg config.Message) (string, error) {
 
 		b.Local <- msg
 	}
-	// TODO: support for ircv3 msgid's
-	return "", nil
+
+	return msg.ID, nil
 }
 
 func (b *Birc) doJoin() {
@@ -288,6 +301,7 @@ func (b *Birc) doConnect() {
 		// TODO: support connecting using a proxy
 		// Since we're doing connections and joins asynchronously now, we can afford a generous timeout here
 		err := b.i.DialerConnect(&net.Dialer{Timeout: 500 * time.Second})
+		b.threads.disconnected()
 		if err != nil {
 			b.Log.Errorf("disconnect: error: %s", err)
 			if b.FirstConnection {
@@ -359,32 +373,12 @@ func (b *Birc) doSend() {
 				}
 
 				if msg.Event == config.EventUserAction {
-					if !b.GetBool("MessageSplit") {
-						err := b.i.Cmd.SendRawf("RELAYMSG %s %s :\x01ACTION %s\x01", msg.Channel, username, text)
-						if err != nil {
-							b.Log.Warn("Error in SendRawf")
-						}
-					} else {
-						cmdline := fmt.Sprintf("RELAYMSG %s %s :\x01ACTION %s\x01\r\n", msg.Channel, username, text)
-						err := b.i.Cmd.SendRawNoSplit(cmdline)
-						if err != nil {
-							b.Log.Warn("Error in SendRawNoSplit")
-						}
-					}
-				} else {
-					b.Log.Debugf("Sending RELAYMSG to channel %s: nick=%s", msg.Channel, username)
-					if !b.GetBool("MessageSplit") {
-						err := b.i.Cmd.SendRawf("RELAYMSG %s %s :%s", msg.Channel, username, text)
-						if err != nil {
-							b.Log.Warn("Error in SendRawf")
-						}
-					} else {
-						cmdline := fmt.Sprintf("RELAYMSG %s %s :%s\r\n", msg.Channel, username, text)
-						err := b.i.Cmd.SendRawNoSplit(cmdline)
-						if err != nil {
-							b.Log.Warn("Error in SendRawNoSplit")
-						}
-					}
+					text = "\x01ACTION " + text + "\x01"
+				}
+
+				err = b.sendIRC(msg, fmt.Sprintf("RELAYMSG %s %s :%s", msg.Channel, username, text))
+				if err != nil {
+					b.Log.Warnf("Error sending RELAYMSG: %s", err)
 				}
 				continue // fix for #235
 			} else { // We have UseRelayMsg set but lack the capability.  Log a warning
@@ -405,16 +399,9 @@ func (b *Birc) doSend() {
 			b.Log.Debugf("Sending to channel %s", msg.Channel)
 		}
 
-		if !b.GetBool("MessageSplit") {
-			err := b.i.Cmd.SendRaw(cmdline)
-			if err != nil {
-				b.Log.Warn("Error in SendRaw")
-			}
-		} else {
-			err := b.i.Cmd.SendRawNoSplit(cmdline + "\r\n")
-			if err != nil {
-				b.Log.Warn("Error in SendRawNoSplit")
-			}
+		err = b.sendIRC(msg, cmdline)
+		if err != nil {
+			b.Log.Warnf("Error sending IRC message: %s", err)
 		}
 	}
 }
@@ -481,6 +468,11 @@ func (b *Birc) getClient() (*girc.Client, error) {
 		Debug:         debug,
 		SupportedCaps: map[string][]string{"overdrivenetworks.com/relaymsg": nil, "draft/relaymsg": nil},
 	})
+
+	if b.GetBool("PreserveThreading") {
+		i.Config.SupportedCaps["echo-message"] = nil
+		i.Config.SupportedCaps["labeled-response"] = nil
+	}
 
 	return i, nil
 }
